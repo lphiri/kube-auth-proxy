@@ -17,12 +17,19 @@ FROM --platform=${BUILDPLATFORM} ${BUILD_IMAGE} AS builder
 # Copy sources
 WORKDIR $GOPATH/src/github.com/opendatahub-io/kube-auth-proxy
 
-# Fetch dependencies
+# Fetch dependencies for main application
 COPY go.mod go.sum ./
 RUN go mod download
 
 # Now pull in our code
 COPY . .
+
+# Setup kube-rbac-proxy dependencies
+WORKDIR $GOPATH/src/github.com/opendatahub-io/kube-auth-proxy/kube-rbac-proxy
+RUN go mod download
+
+# Go back to main workdir
+WORKDIR $GOPATH/src/github.com/opendatahub-io/kube-auth-proxy
 
 # Arguments go here so that the previous steps can be cached if no external sources
 # have changed. These arguments are automatically set by the docker engine.
@@ -51,7 +58,11 @@ RUN case ${TARGETPLATFORM} in \
          "linux/arm/v7") GOARCH=arm GOARM=7 ;; \
     esac && \
     printf "Building OAuth2 Proxy for arch ${GOARCH}\n" && \
-    GOARCH=${GOARCH} VERSION=${VERSION} make build && touch jwt_signing_key.pem
+    GOARCH=${GOARCH} VERSION=${VERSION} make build && touch jwt_signing_key.pem && \
+    printf "Building kube-rbac-proxy for arch ${GOARCH}\n" && \
+    cd kube-rbac-proxy && GOARCH=${GOARCH} make build && \
+    cd .. && printf "Building entrypoint for arch ${GOARCH}\n" && \
+    CGO_ENABLED=0 GOARCH=${GOARCH} go build -a -installsuffix cgo -o entrypoint ./cmd/entrypoint
 
 # Reload runtime image
 ARG RUNTIME_IMAGE
@@ -61,7 +72,9 @@ FROM ${RUNTIME_IMAGE}
 ARG VERSION
 
 COPY --from=builder /go/src/github.com/opendatahub-io/kube-auth-proxy/kube-auth-proxy /bin/kube-auth-proxy
+COPY --from=builder /go/src/github.com/opendatahub-io/kube-auth-proxy/kube-rbac-proxy/_output/kube-rbac-proxy /bin/kube-rbac-proxy
 COPY --from=builder /go/src/github.com/opendatahub-io/kube-auth-proxy/jwt_signing_key.pem /etc/ssl/private/jwt_signing_key.pem
+COPY --from=builder /go/src/github.com/opendatahub-io/kube-auth-proxy/entrypoint /bin/entrypoint
 
 LABEL org.opencontainers.image.licenses=MIT \
       org.opencontainers.image.description="A reverse proxy that provides authentication with Google, Azure, OpenID Connect and many more identity providers." \
@@ -71,4 +84,4 @@ LABEL org.opencontainers.image.licenses=MIT \
       org.opencontainers.image.title=kube-auth-proxy \
       org.opencontainers.image.version=${VERSION}
 
-ENTRYPOINT ["/bin/kube-auth-proxy"]
+ENTRYPOINT ["/bin/entrypoint"]
